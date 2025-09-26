@@ -49,8 +49,8 @@ bool ConfigManager::saveConfig()
 void ConfigManager::loadDefaults()
 {
     // WiFi defaults
-    strcpy(config_.wifi.ssid, "YourWiFiSSID");
-    strcpy(config_.wifi.password, "YourWiFiPassword");
+    strcpy(config_.wifi.ssid, "PrimeAlphA");
+    strcpy(config_.wifi.password, "AlphaDBR11");
     strcpy(config_.wifi.hostname, "bitbots-ecoWatt");
 
     // API defaults

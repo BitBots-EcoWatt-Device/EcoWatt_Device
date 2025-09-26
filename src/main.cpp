@@ -18,6 +18,21 @@ ESP8266PollingConfig pollingConfig;
 Ticker pollTicker;
 Ticker uploadTicker;
 
+// Ticker flags (set from ISR-safe callbacks)
+volatile bool pollRequested = false;
+volatile bool uploadRequested = false;
+
+// ISR-safe callback wrappers - only set flags
+void IRAM_ATTR onPollTicker()
+{
+    pollRequested = true;
+}
+
+void IRAM_ATTR onUploadTicker()
+{
+    uploadRequested = true;
+}
+
 // Status variables
 unsigned long startTime;
 bool systemInitialized = false;
@@ -33,6 +48,12 @@ void printSystemStatus();
 void handleSerialCommands();
 bool uploadToServer(const std::vector<Sample> &samples);
 
+// Task scheduling variables
+unsigned long lastYield = 0;
+const unsigned long YIELD_INTERVAL = 50; // Yield every 50ms
+const unsigned long MIN_TASK_INTERVAL = 100; // Minimum time between tasks
+unsigned long lastTaskTime = 0;
+
 void setup()
 {
     Serial.begin(115200);
@@ -43,6 +64,16 @@ void setup()
     Serial.println("    BitBots EcoWatt ESP8266");
     Serial.println("==================================");
 
+    // Disable all power saving and optimize for stability
+    WiFi.persistent(false);       // Disable flash writes for WiFi
+    system_update_cpu_freq(160);  // Set CPU to 160MHz for better stability
+    
+    // Increase WiFi TX power
+    WiFi.setOutputPower(20.5);
+    
+    // Disable all sleep modes
+    wifi_set_sleep_type(NONE_SLEEP_T);
+    
     startTime = millis();
     systemInitialized = initializeSystem();
 
@@ -52,8 +83,9 @@ void setup()
 
         // Start polling and upload timers
         const DeviceConfig &deviceConfig = configManager.getDeviceConfig();
-        pollTicker.attach_ms(deviceConfig.poll_interval_ms, pollSensors);
-        uploadTicker.attach_ms(deviceConfig.upload_interval_ms, uploadData);
+        // Attach ISR-safe wrappers that only set flags. Heavy work runs in loop().
+        pollTicker.attach_ms(deviceConfig.poll_interval_ms, onPollTicker);
+        uploadTicker.attach_ms(deviceConfig.upload_interval_ms, onUploadTicker);
 
         Serial.println("[MAIN] System initialized successfully");
         printSystemStatus();
@@ -66,8 +98,49 @@ void setup()
 
 void loop()
 {
+    static unsigned long lastYield = 0;
+    static unsigned long lastWiFiCheck = 0;
+    const unsigned long YIELD_INTERVAL = 25;    // More frequent yields
+    const unsigned long WIFI_CHECK_INTERVAL = 5000; // Check WiFi every 5 seconds
+    
+    unsigned long currentMillis = millis();
+    
+    // More frequent yields for better stability
+    if (currentMillis - lastYield >= YIELD_INTERVAL) {
+        yield();
+        ESP.wdtFeed();
+        lastYield = currentMillis;
+    }
+    
+    // Regular WiFi status checks
+    if (currentMillis - lastWiFiCheck >= WIFI_CHECK_INTERVAL) {
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[WiFi] Connection lost, reconnecting...");
+            WiFi.disconnect();
+            delay(100);
+            WiFi.reconnect();
+        }
+        lastWiFiCheck = currentMillis;
+    }
     // Handle serial commands for configuration
     handleSerialCommands();
+
+    // Allow background tasks to run
+    yield();
+
+    // Handle scheduled work requested by ticker callbacks (safe context)
+    if (pollRequested)
+    {
+        // clear flag as soon as possible
+        pollRequested = false;
+        pollSensors();
+    }
+
+    if (uploadRequested)
+    {
+        uploadRequested = false;
+        uploadData();
+    }
 
     // Basic watchdog - restart if system hangs
     static unsigned long lastLoopTime = 0;
@@ -126,13 +199,26 @@ void pollSensors()
     if (!systemInitialized)
         return;
 
+    unsigned long currentMillis = millis();
+    
+    // Ensure minimum time between tasks
+    if (currentMillis - lastTaskTime < MIN_TASK_INTERVAL) {
+        delay(10);
+        yield();
+        return;
+    }
+    lastTaskTime = currentMillis;
+
     Serial.println("[POLL] Starting sensor polling...");
 
     Sample sample;
-    sample.timestamp = millis() - startTime;
+    sample.timestamp = currentMillis - startTime;
 
     bool allSuccess = true;
     const auto &enabledParams = pollingConfig.getEnabledParameters();
+    
+    // Reset WiFi watchdog timer
+    ESP.wdtFeed();
 
     for (ParameterType paramType : enabledParams)
     {
@@ -204,20 +290,20 @@ bool uploadToServer(const std::vector<Sample> &samples)
     HTTPClient httpClient;
     WiFiClient wifiClient;
 
-    httpClient.begin(wifiClient, "http://172.20.10.4:5001/upload"); // Cloud dashboard upload URL
+    httpClient.begin(wifiClient, "http://10.63.73.102:5000/upload"); // Cloud dashboard upload URL
     httpClient.addHeader("Content-Type", "application/json");
     httpClient.setTimeout(apiConfig.timeout_ms);
 
     // Create JSON payload
-    DynamicJsonDocument jsonDoc(4096); // Adjust size as needed
-    JsonArray samplesArray = jsonDoc.createNestedArray("samples");
+    JsonDocument jsonDoc;
+    JsonArray samplesArray = jsonDoc["samples"].to<JsonArray>();
 
     for (const Sample &sample : samples)
     {
-        JsonObject sampleObj = samplesArray.createNestedObject();
+        JsonObject sampleObj = samplesArray.add<JsonObject>();
         sampleObj["timestamp"] = sample.timestamp;
 
-        JsonObject dataObj = sampleObj.createNestedObject("data");
+        JsonObject dataObj = sampleObj["data"].to<JsonObject>();
         for (ParameterType param : pollingConfig.getEnabledParameters())
         {
             if (sample.hasValue(param))

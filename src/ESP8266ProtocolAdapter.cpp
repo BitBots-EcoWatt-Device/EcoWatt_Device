@@ -1,4 +1,5 @@
 #include "ESP8266ProtocolAdapter.h"
+#include <Schedule.h>
 
 ESP8266ProtocolAdapter::ESP8266ProtocolAdapter() : lastConnectionCheck_(0)
 {
@@ -16,14 +17,29 @@ bool ESP8266ProtocolAdapter::connectWiFi()
     Serial.print("[WiFi] Connecting to ");
     Serial.println(wifiConfig.ssid);
 
+    WiFi.persistent(false);  // Disable storing WiFi settings in flash
+    WiFi.mode(WIFI_OFF);     // Turn off WiFi
+    delay(100);              // Short delay to ensure WiFi is fully off
+    
+    // Configure WiFi for maximum stability
+    WiFi.mode(WIFI_STA);     // Set station mode
+    WiFi.setSleepMode(WIFI_NONE_SLEEP); // Disable all power saving
+    WiFi.setAutoReconnect(true);  // Enable auto reconnect
+    WiFi.setOutputPower(20.5);    // Set to maximum power
+    
     WiFi.hostname(wifiConfig.hostname);
     WiFi.begin(wifiConfig.ssid, wifiConfig.password);
+    
+    // Disable modem sleep modes
+    wifi_set_sleep_type(NONE_SLEEP_T);
 
     // Wait for connection with timeout
     unsigned long startTime = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000)
     {
-        delay(500);
+        delay(100); // Shorter delays
+        yield();    // Explicit yield
+        ESP.wdtFeed(); // Feed the watchdog
         Serial.print(".");
     }
 
@@ -44,15 +60,32 @@ bool ESP8266ProtocolAdapter::connectWiFi()
 
 bool ESP8266ProtocolAdapter::sendReadRequest(const String &frameHex, String &outFrameHex)
 {
+    static unsigned long lastRequestTime = 0;
+    const unsigned long MIN_REQUEST_INTERVAL = 100; // Minimum 100ms between requests
+    
+    // Ensure minimum time between requests
+    unsigned long now = millis();
+    if (now - lastRequestTime < MIN_REQUEST_INTERVAL) {
+        delay(10);
+        yield();
+        return false;
+    }
+    lastRequestTime = now;
+    
     // Check connection periodically
-    if (millis() - lastConnectionCheck_ > CONNECTION_CHECK_INTERVAL)
+    unsigned long currentMillis = millis();
+    if (currentMillis - lastConnectionCheck_ > CONNECTION_CHECK_INTERVAL)
     {
-        if (!isConnected())
+        lastConnectionCheck_ = currentMillis;
+        if (WiFi.status() != WL_CONNECTED)
         {
-            Serial.println("[WiFi] Connection lost, attempting reconnect...");
-            connectWiFi();
+            Serial.println("[WiFi] Connection lost, attempting to reconnect...");
+            if (!connectWiFi())
+            {
+                return false;
+            }
         }
-        lastConnectionCheck_ = millis();
+        yield(); // Allow WiFi processing after connection check
     }
 
     if (!isConnected())
@@ -81,12 +114,16 @@ bool ESP8266ProtocolAdapter::postJSON(const String &url, const String &frameHex,
 {
     const APIConfig &apiConfig = configManager.getAPIConfig();
 
-    httpClient_.begin(wifiClient_, url);
+    yield(); // Allow WiFi processing
+    if (!httpClient_.begin(wifiClient_, url)) {
+        Serial.println("[HTTP] Failed to initialize HTTP client");
+        return false;
+    }
     setupHTTPHeaders(httpClient_);
     httpClient_.setTimeout(apiConfig.timeout_ms);
 
     // Create JSON payload
-    StaticJsonDocument<512> jsonDoc;
+    JsonDocument jsonDoc;
     jsonDoc["frame"] = frameHex;
 
     String payload;
@@ -110,7 +147,7 @@ bool ESP8266ProtocolAdapter::postJSON(const String &url, const String &frameHex,
         if (httpResponseCode == HTTP_CODE_OK)
         {
             // Parse JSON response
-            StaticJsonDocument<512> responseDoc;
+            JsonDocument responseDoc;
             DeserializationError error = deserializeJson(responseDoc, response);
 
             if (error)
@@ -121,7 +158,7 @@ bool ESP8266ProtocolAdapter::postJSON(const String &url, const String &frameHex,
                 return false;
             }
 
-            if (responseDoc.containsKey("frame"))
+            if (responseDoc["frame"].is<const char*>())
             {
                 outFrameHex = responseDoc["frame"].as<String>();
                 httpClient_.end();

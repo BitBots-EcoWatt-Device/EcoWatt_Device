@@ -35,7 +35,7 @@ const uint16_t ESP8266ModbusHandler::crc16_table[256] = {
     0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,
     0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040};
 
-ESP8266ModbusHandler::ESP8266ModbusHandler()
+ESP8266ModbusHandler::ESP8266ModbusHandler() : lastOperationTime_(0)
 {
 }
 
@@ -44,19 +44,61 @@ bool ESP8266ModbusHandler::begin()
     return adapter_.begin();
 }
 
+bool ESP8266ModbusHandler::waitForOperationTimeout()
+{
+    unsigned long currentTime = millis();
+    if (currentTime - lastOperationTime_ < MODBUS_OPERATION_TIMEOUT) {
+        unsigned long waitTime = MODBUS_OPERATION_TIMEOUT - (currentTime - lastOperationTime_);
+        delay(min(waitTime, (unsigned long)100)); // Break up long delays
+        yield(); // Allow WiFi processing
+        return true;
+    }
+    lastOperationTime_ = currentTime;
+    return false;
+}
+
 bool ESP8266ModbusHandler::readRegisters(uint16_t startAddr, uint16_t numRegs, std::vector<uint16_t> &values, uint8_t slaveAddr)
 {
+    // Check if enough time has passed since last operation
+    if (waitForOperationTimeout()) {
+        return false; // Not enough time has passed
+    }
+    
+    // Clear any previous values
+    values.clear();
+    
     String frameHex = buildReadFrame(slaveAddr, startAddr, numRegs);
     String responseHex;
 
-    if (!adapter_.sendReadRequest(frameHex, responseHex))
-    {
-        Serial.println("[MODBUS] Failed to send read request");
-        return false;
+    // Debug: print outgoing frame
+    Serial.print("[MODBUS] Outgoing frame: ");
+    Serial.println(frameHex);
+
+    for (int retry = 0; retry < MODBUS_RETRY_COUNT; retry++) {
+        yield(); // Allow WiFi processing
+        
+        if (adapter_.sendReadRequest(frameHex, responseHex)) {
+            // Debug: print received raw hex from adapter
+            Serial.print("[MODBUS] Received hex: ");
+            Serial.println(responseHex);
+            break;
+        }
+        
+        if (retry < MODBUS_RETRY_COUNT - 1) {
+            delay(MODBUS_RETRY_DELAY);
+            yield();
+            delay(10); // Additional short delay for stability
+        } else {
+            Serial.println("[MODBUS] Failed to send read request after retries");
+            return false;
+        }
     }
 
     // Parse response
     std::vector<uint8_t> response = hexToBytes(responseHex);
+
+    Serial.print("[MODBUS] Response bytes: ");
+    Serial.println(response.size());
 
     if (response.size() < 5)
     {
@@ -67,8 +109,12 @@ bool ESP8266ModbusHandler::readRegisters(uint16_t startAddr, uint16_t numRegs, s
     // Check for exception
     if (response[1] & 0x80)
     {
-        Serial.print("[MODBUS] Exception: ");
-        Serial.println(modbusExceptionMessage(response[2]));
+        uint8_t exCode = response[2];
+        Serial.print("[MODBUS] Exception code: 0x");
+        if (exCode < 0x10) Serial.print('0');
+        Serial.print(String(exCode, HEX));
+        Serial.print(" (dec "); Serial.print(exCode); Serial.print(") -> ");
+        Serial.println(modbusExceptionMessage(exCode));
         return false;
     }
 
@@ -79,15 +125,21 @@ bool ESP8266ModbusHandler::readRegisters(uint16_t startAddr, uint16_t numRegs, s
 
     if (receivedCRC != calculatedCRC)
     {
-        Serial.println("[MODBUS] CRC mismatch");
+        Serial.print("[MODBUS] CRC mismatch: received=0x");
+        Serial.print(String(receivedCRC, HEX));
+        Serial.print(" calculated=0x");
+        Serial.println(String(calculatedCRC, HEX));
         return false;
     }
 
     // Extract register values
-    uint8_t byteCount = response[2];
+    size_t byteCount = static_cast<size_t>(response[2]);
     if (response.size() != byteCount + 5)
     {
-        Serial.println("[MODBUS] Invalid byte count");
+        Serial.print("[MODBUS] Invalid byte count: expected=");
+        Serial.print(byteCount + 5);
+        Serial.print(" actual=");
+        Serial.println(response.size());
         return false;
     }
 
@@ -195,10 +247,10 @@ String ESP8266ModbusHandler::bytesToHex(const std::vector<uint8_t> &bytes)
 std::vector<uint8_t> ESP8266ModbusHandler::hexToBytes(const String &hex)
 {
     std::vector<uint8_t> bytes;
-    for (int i = 0; i < hex.length(); i += 2)
+    for (size_t i = 0; i < hex.length(); i += 2)
     {
         String byteString = hex.substring(i, i + 2);
-        bytes.push_back(strtol(byteString.c_str(), NULL, 16));
+        bytes.push_back(static_cast<uint8_t>(strtol(byteString.c_str(), NULL, 16)));
     }
     return bytes;
 }

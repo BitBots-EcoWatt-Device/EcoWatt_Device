@@ -5,6 +5,10 @@
 #include <vector>
 #include "ESP8266ProtocolAdapter.h"
 
+#define MODBUS_RETRY_COUNT 3
+#define MODBUS_RETRY_DELAY 100
+#define MODBUS_OPERATION_TIMEOUT 2000
+
 class ESP8266ModbusHandler
 {
 public:
@@ -19,7 +23,9 @@ public:
 
 private:
     ESP8266ProtocolAdapter adapter_;
-
+    unsigned long lastOperationTime_;
+    
+    bool waitForOperationTimeout();
     String buildReadFrame(uint8_t slaveAddr, uint16_t startAddr, uint16_t numRegs);
     String buildWriteFrame(uint8_t slaveAddr, uint16_t regAddr, uint16_t regValue);
     String bytesToHex(const std::vector<uint8_t> &bytes);

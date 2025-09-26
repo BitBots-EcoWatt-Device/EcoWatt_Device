@@ -7,11 +7,10 @@ bool ESP8266PollingConfig::configsInitialized_ = false;
 
 ESP8266PollingConfig::ESP8266PollingConfig()
 {
-    if (!configsInitialized_)
-    {
-        initializeParameterConfigs();
-        configsInitialized_ = true;
-    }
+    // Do not initialize parameter configs during static/global initialization.
+    // Some platforms (ESP8266) don't have the heap ready yet which causes
+    // Arduino String constructions to produce empty strings. We rely on
+    // lazy initialization in getParameterConfig()/printEnabledParameters().
 }
 
 void ESP8266PollingConfig::initializeParameterConfigs()
@@ -37,6 +36,9 @@ void ESP8266PollingConfig::initializeParameterConfigs()
         {"Export Power Percent", " %", ParameterReaders::readExportPowerPercent};
     parameterConfigs_[static_cast<int>(ParameterType::OUTPUT_POWER)] =
         {"Output Power", " W", ParameterReaders::readOutputPower};
+
+    // Mark initialized only after strings are constructed at runtime
+    configsInitialized_ = true;
 }
 
 void ESP8266PollingConfig::setParameters(const std::vector<ParameterType> &params)
@@ -46,17 +48,39 @@ void ESP8266PollingConfig::setParameters(const std::vector<ParameterType> &param
 
 const ParameterConfig &ESP8266PollingConfig::getParameterConfig(ParameterType param) const
 {
+    // Ensure configs are initialized (lazy init). This avoids static-init order
+    // or heap-not-ready issues if constructors ran too early.
+    if (!configsInitialized_)
+    {
+        // cast away const to initialize once
+        const_cast<ESP8266PollingConfig *>(this)->initializeParameterConfigs();
+        const_cast<bool &>(configsInitialized_) = true;
+    }
     return parameterConfigs_[static_cast<int>(param)];
 }
 
 void ESP8266PollingConfig::printEnabledParameters() const
 {
+    // Ensure parameter configs are initialized before printing
+    if (!configsInitialized_)
+    {
+        const_cast<ESP8266PollingConfig *>(this)->initializeParameterConfigs();
+        const_cast<bool &>(configsInitialized_) = true;
+    }
     Serial.println("[POLLING] Enabled parameters:");
     for (ParameterType param : enabledParameters_)
     {
         const ParameterConfig &config = getParameterConfig(param);
-        Serial.print("  - ");
+        // Debug: print numeric index and string lengths to diagnose empty names
+        Serial.print("  - [");
+        Serial.print(static_cast<int>(param));
+        Serial.print("] ");
         Serial.print(config.name);
+        Serial.print(" (len=");
+        Serial.print(config.name.length());
+        Serial.print(") unit(len=");
+        Serial.print(config.unit.length());
+        Serial.print(") ");
         Serial.println(config.unit);
     }
 }
