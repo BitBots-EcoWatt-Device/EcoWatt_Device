@@ -300,13 +300,9 @@ bool uploadToServer(const std::vector<Sample> &samples)
     // Session/window metadata
     static uint32_t session_counter = 0;
     // Derive window timing from first/last sample timestamps
-    uint32_t window_start = samples.empty() ? 0 : samples.front().timestamp;
-    uint32_t window_end = samples.empty() ? 0 : samples.back().timestamp;
     jsonDoc["device_id"] = WiFi.hostname();
     jsonDoc["timestamp"] = millis() - startTime; // client send time
     jsonDoc["session_id"] = (uint32_t)(ESP.getChipId() ^ millis() ^ (++session_counter));
-    jsonDoc["window_start_ms"] = window_start;
-    jsonDoc["window_end_ms"] = window_end;
     jsonDoc["poll_count"] = (int)samples.size();
 
     // Accumulators for a single-document (non-chunked) build
@@ -381,23 +377,12 @@ bool uploadToServer(const std::vector<Sample> &samples)
         for (auto d : deltas) payloadArr.add((long)d);
         field["payload_varint_hex"] = Compression::hex_encode(varintBytes);
 
-        // Accumulate upload-level totals
-        totalOriginalBytes += (4 * series.size());
-        totalCompressedBytes += bytes_len;
-        totalCpuMs += cpu_ms;
-        verifyAll = verifyAll && verify_ok;
     };
 
     const auto enabledParams = pollingConfig.getEnabledParameters();
 
     // First, attempt to build a single-chunk payload and see if it fits
     for (ParameterType p : enabledParams) { appendParamField(jsonDoc, p); }
-
-    // Add upload-level metadata for original/compressed sizes and verification
-    jsonDoc["original_payload_size_bytes_total"] = (int)totalOriginalBytes;
-    jsonDoc["compressed_payload_size_bytes_total"] = (int)totalCompressedBytes;
-    jsonDoc["cpu_time_ms_total"] = totalCpuMs;
-    jsonDoc["verify_ok_all"] = verifyAll;
 
     const size_t PAYLOAD_THRESHOLD = 3500; // bytes; adjust if needed
 

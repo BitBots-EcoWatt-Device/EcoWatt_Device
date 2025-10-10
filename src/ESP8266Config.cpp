@@ -49,15 +49,15 @@ bool ConfigManager::saveConfig()
 void ConfigManager::loadDefaults()
 {
     // WiFi defaults
-    strcpy(config_.wifi.ssid, "HONOR X9c");
-    strcpy(config_.wifi.password, "dinu1234");
+    strcpy(config_.wifi.ssid, "Galaxy M12 AC20");
+    strcpy(config_.wifi.password, "ABC123___");
     strcpy(config_.wifi.hostname, "bitbots-ecoWatt");
 
     // API defaults
     strcpy(config_.api.api_key, "NjhhZWIwNDU1ZDdmMzg3MzNiMTQ5YTFjOjY4YWViMDQ1NWQ3ZjM4NzMzYjE0OWExMg==");
     strcpy(config_.api.read_url, "http://20.15.114.131:8080/api/inverter/read");
     strcpy(config_.api.write_url,"http://20.15.114.131:8080/api/inverter/write");
-    strcpy(config_.api.upload_url,"http://10.178.162.228:5000/upload");
+    strcpy(config_.api.upload_url,"http://10.238.139.181:5000/upload");
     config_.api.timeout_ms = 5000;
 
     // Device defaults
